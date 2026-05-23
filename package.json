@@ -1,6 +1,11 @@
 {
   "name": "propedge-backend",
-  "type": "module",
-  "scripts": { "start": "node server.js" },
-  "dependencies": { "express": "^4.18.0", "cors": "^2.8.5" }
+  "version": "1.0.0",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.0",
+    "cors": "^2.8.5"
+  }
 }
