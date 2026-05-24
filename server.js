@@ -15,7 +15,7 @@ app.use((req, res, next) => {
 
 app.use(express.json({ limit: "10mb" }));
 
-const ANTHROPIC_KEY = "sk-ant-api03-Q_wtHo6hebcezLX6uvhyQ2jR5E2RQp4p-XzrYbWxJhycpcWZ1Jdf1sX_LbhEqJgFLb0LTDBQgFwLeXmpenplYA-qaXRlQAA";
+const ANTHROPIC_KEY = process.env.ANTHROPIC_KEY;
 const ODDS_KEY = "300321be5cb6ceb939c23cb0c40a04da";
 
 app.get("/", (req, res) => {
