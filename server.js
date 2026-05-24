@@ -1,6 +1,6 @@
 const express = require("express");
-const fs = require("fs");
-const path = require("path");
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
 const app = express();
 const PORT = process.env.PORT || 3001;
 
@@ -18,57 +18,94 @@ app.use("/api/stripe/webhook", express.raw({ type: "application/json" }));
 app.use(express.json({ limit: "10mb" }));
 
 const ODDS_KEY = process.env.ODDS_KEY;
-const STRIPE_SECRET = process.env.STRIPE_SECRET; // sk_live_... or sk_test_...
-const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET; // whsec_...
-const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID; // price_...
+const STRIPE_SECRET = process.env.STRIPE_SECRET;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const STRIPE_PRICE_ID = process.env.STRIPE_PRICE_ID;
 const APP_URL = process.env.APP_URL || "https://resplendent-kitsune-13d57e.netlify.app";
+const MONGODB_URI = process.env.MONGODB_URI;
 
-const USERS_FILE = path.join("/tmp", "elitebetsai_users.json");
+// ── MongoDB Connection ────────────────────────
+mongoose.connect(MONGODB_URI)
+  .then(() => console.log("✓ Connected to MongoDB"))
+  .catch((err) => console.error("MongoDB connection error:", err));
 
-function loadUsers() {
-  try {
-    if (fs.existsSync(USERS_FILE)) return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
-  } catch {}
-  return {};
-}
-function saveUsers(users) {
-  try { fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2)); } catch (e) { console.error(e); }
-}
+// ── User Schema ───────────────────────────────
+const userSchema = new mongoose.Schema({
+  id: String,
+  name: { type: String, required: true },
+  email: { type: String, required: true, unique: true, lowercase: true },
+  password: { type: String, required: true },
+  plan: { type: String, default: "free" },
+  createdAt: { type: String, default: () => new Date().toISOString() },
+  savedProps: { type: Array, default: [] },
+  alerts: { type: Array, default: [] },
+  stripeCustomerId: { type: String, default: null },
+  subscriptionId: { type: String, default: null },
+});
+
+const User = mongoose.models.User || mongoose.model("User", userSchema);
 
 // ── Health ────────────────────────────────────
 app.get("/", (req, res) => res.json({ status: "EliteBetsAI backend running" }));
 
-// ── Auth ──────────────────────────────────────
-app.post("/api/auth/register", (req, res) => {
+// ── Auth: Register ────────────────────────────
+app.post("/api/auth/register", async (req, res) => {
   const { name, email, password } = req.body;
   if (!name || !email || !password) return res.status(400).json({ error: "All fields required" });
   if (password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
-  const users = loadUsers();
-  if (users[email]) return res.status(409).json({ error: "Email already registered" });
-  const user = { id: Date.now().toString(), name, email, password, plan: "free", createdAt: new Date().toISOString(), savedProps: [], alerts: [], stripeCustomerId: null, subscriptionId: null };
-  users[email] = user;
-  saveUsers(users);
-  const { password: _, ...safeUser } = user;
-  res.json({ user: safeUser });
+
+  try {
+    const existing = await User.findOne({ email: email.toLowerCase() });
+    if (existing) return res.status(409).json({ error: "Email already registered" });
+
+    const hashed = await bcrypt.hash(password, 10);
+    const user = await User.create({
+      id: Date.now().toString(),
+      name,
+      email: email.toLowerCase(),
+      password: hashed,
+    });
+
+    const { password: _, ...safeUser } = user.toObject();
+    res.json({ user: safeUser });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Registration failed" });
+  }
 });
 
-app.post("/api/auth/login", (req, res) => {
+// ── Auth: Login ───────────────────────────────
+app.post("/api/auth/login", async (req, res) => {
   const { email, password } = req.body;
-  const users = loadUsers();
-  const user = users[email];
-  if (!user) return res.status(404).json({ error: "No account found with that email" });
-  if (user.password !== password) return res.status(401).json({ error: "Incorrect password" });
-  const { password: _, ...safeUser } = user;
-  res.json({ user: safeUser });
+
+  try {
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user) return res.status(404).json({ error: "No account found with that email" });
+
+    const match = await bcrypt.compare(password, user.password);
+    if (!match) return res.status(401).json({ error: "Incorrect password" });
+
+    const { password: _, ...safeUser } = user.toObject();
+    res.json({ user: safeUser });
+  } catch (err) {
+    res.status(500).json({ error: "Login failed" });
+  }
 });
 
-app.post("/api/auth/update", (req, res) => {
+// ── Auth: Update profile ──────────────────────
+app.post("/api/auth/update", async (req, res) => {
   const { email, name } = req.body;
-  const users = loadUsers();
-  if (!users[email]) return res.status(404).json({ error: "User not found" });
-  users[email].name = name;
-  saveUsers(users);
-  res.json({ success: true });
+  try {
+    const user = await User.findOneAndUpdate(
+      { email: email.toLowerCase() },
+      { name },
+      { new: true }
+    );
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Update failed" });
+  }
 });
 
 // ── Stripe: Create checkout session ──────────
@@ -80,20 +117,18 @@ app.post("/api/stripe/create-checkout", async (req, res) => {
     const Stripe = require("stripe");
     const stripe = Stripe(STRIPE_SECRET);
 
-    // Create or get customer
-    const users = loadUsers();
-    let customerId = users[email]?.stripeCustomerId;
+    const user = await User.findOne({ email: email.toLowerCase() });
+    let customerId = user?.stripeCustomerId;
 
     if (!customerId) {
       const customer = await stripe.customers.create({ email, metadata: { userId } });
       customerId = customer.id;
-      if (users[email]) {
-        users[email].stripeCustomerId = customerId;
-        saveUsers(users);
+      if (user) {
+        user.stripeCustomerId = customerId;
+        await user.save();
       }
     }
 
-    // Create checkout session
     const session = await stripe.checkout.sessions.create({
       customer: customerId,
       payment_method_types: ["card"],
@@ -111,7 +146,7 @@ app.post("/api/stripe/create-checkout", async (req, res) => {
   }
 });
 
-// ── Stripe: Customer portal (manage subscription) ──
+// ── Stripe: Customer portal ───────────────────
 app.post("/api/stripe/portal", async (req, res) => {
   const { email } = req.body;
   if (!STRIPE_SECRET) return res.status(500).json({ error: "Stripe not configured" });
@@ -119,12 +154,11 @@ app.post("/api/stripe/portal", async (req, res) => {
   try {
     const Stripe = require("stripe");
     const stripe = Stripe(STRIPE_SECRET);
-    const users = loadUsers();
-    const customerId = users[email]?.stripeCustomerId;
-    if (!customerId) return res.status(404).json({ error: "No subscription found" });
+    const user = await User.findOne({ email: email.toLowerCase() });
+    if (!user?.stripeCustomerId) return res.status(404).json({ error: "No subscription found" });
 
     const session = await stripe.billingPortal.sessions.create({
-      customer: customerId,
+      customer: user.stripeCustomerId,
       return_url: APP_URL,
     });
     res.json({ url: session.url });
@@ -133,7 +167,7 @@ app.post("/api/stripe/portal", async (req, res) => {
   }
 });
 
-// ── Stripe: Webhook (handles payment events) ──
+// ── Stripe: Webhook ───────────────────────────
 app.post("/api/stripe/webhook", async (req, res) => {
   if (!STRIPE_SECRET) return res.sendStatus(200);
 
@@ -143,29 +177,24 @@ app.post("/api/stripe/webhook", async (req, res) => {
     const sig = req.headers["stripe-signature"];
     const event = stripe.webhooks.constructEvent(req.body, sig, STRIPE_WEBHOOK_SECRET);
 
-    const users = loadUsers();
-
     if (event.type === "checkout.session.completed") {
       const session = event.data.object;
       const email = session.metadata?.email;
-      if (email && users[email]) {
-        users[email].plan = "pro";
-        users[email].subscriptionId = session.subscription;
-        saveUsers(users);
+      if (email) {
+        await User.findOneAndUpdate(
+          { email: email.toLowerCase() },
+          { plan: "pro", subscriptionId: session.subscription }
+        );
         console.log(`✓ Upgraded to Pro: ${email}`);
       }
     }
 
     if (event.type === "customer.subscription.deleted") {
       const sub = event.data.object;
-      // Find user by subscription ID
-      const user = Object.values(users).find((u) => u.subscriptionId === sub.id);
-      if (user) {
-        users[user.email].plan = "free";
-        users[user.email].subscriptionId = null;
-        saveUsers(users);
-        console.log(`✓ Downgraded to Free: ${user.email}`);
-      }
+      await User.findOneAndUpdate(
+        { subscriptionId: sub.id },
+        { plan: "free", subscriptionId: null }
+      );
     }
 
     res.sendStatus(200);
@@ -176,11 +205,14 @@ app.post("/api/stripe/webhook", async (req, res) => {
 });
 
 // ── Check subscription status ─────────────────
-app.get("/api/auth/subscription/:email", (req, res) => {
-  const users = loadUsers();
-  const user = users[req.params.email];
-  if (!user) return res.status(404).json({ error: "User not found" });
-  res.json({ plan: user.plan, subscriptionId: user.subscriptionId });
+app.get("/api/auth/subscription/:email", async (req, res) => {
+  try {
+    const user = await User.findOne({ email: req.params.email.toLowerCase() });
+    if (!user) return res.status(404).json({ error: "User not found" });
+    res.json({ plan: user.plan, subscriptionId: user.subscriptionId });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to fetch subscription" });
+  }
 });
 
 // ── Odds API proxy ────────────────────────────
