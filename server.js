@@ -1,23 +1,22 @@
 const express = require("express");
-const cors = require("cors");
-
 const app = express();
+const PORT = process.env.PORT || 3001;
 
-// Allow ALL origins explicitly
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST", "OPTIONS"],
-  allowedHeaders: ["Content-Type", "Authorization"],
-}));
-
-// Handle preflight OPTIONS requests
-app.options("*", cors());
+// Manually set CORS headers on every response
+app.use((req, res, next) => {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(200);
+  }
+  next();
+});
 
 app.use(express.json({ limit: "10mb" }));
 
 const ANTHROPIC_KEY = "sk-ant-api03-Q_wtHo6hebcezLX6uvhyQ2jR5E2RQp4p-XzrYbWxJhycpcWZ1Jdf1sX_LbhEqJgFLb0LTDBQgFwLeXmpenplYA-qaXRlQAA";
 const ODDS_KEY = "300321be5cb6ceb939c23cb0c40a04da";
-const PORT = process.env.PORT || 3001;
 
 app.get("/", (req, res) => {
   res.json({ status: "OddsIQ backend running" });
@@ -37,7 +36,6 @@ app.post("/api/analyze", async (req, res) => {
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error("Anthropic error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -52,11 +50,8 @@ app.get("/api/odds/*", async (req, res) => {
     const data = await response.json();
     res.json(data);
   } catch (err) {
-    console.error("Odds API error:", err.message);
     res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(PORT, function () {
-  console.log("OddsIQ backend running on port " + PORT);
-});
+app.listen(PORT, () => console.log("OddsIQ backend on port " + PORT));
